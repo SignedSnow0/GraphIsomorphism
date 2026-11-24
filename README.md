@@ -18,3 +18,8 @@ The objective of this project is to evaluate graph isomoprhism and the speed usi
 
 The main comparison metrix is speed, the test will run the algorithm on both CPU and GPU to compare the running times.
 The test can focus on varius densities to check the best representations for different graphs.
+
+## Additional features
+
+Planar graphs can be checked for isomorphism in $O(n)$ time, and a graph
+can be checked if it is planar in $O(n)$ time.
