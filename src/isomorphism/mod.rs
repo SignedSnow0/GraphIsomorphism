@@ -49,6 +49,7 @@ impl std::fmt::Display for Mapping {
 /// The worst-case running time is exponential in the number of vertices.
 /// Graphs that are hard for color refinement, such as large regular graphs,
 /// are the expensive cases.
+/// 
 pub fn find_isomorphism(graph_a: &Graph, graph_b: &Graph) -> Option<Mapping> {
     if graph_a.num_vertices != graph_b.num_vertices || graph_a.num_edges() != graph_b.num_edges() {
         return None;
@@ -74,6 +75,22 @@ pub fn find_isomorphism(graph_a: &Graph, graph_b: &Graph) -> Option<Mapping> {
         &candidate_matrix,
         words_per_row,
     )
+}
+
+/// Runs only the 1-WL colour refinement on two graphs.
+///
+/// * `None`  -> the graphs are definitely NOT isomorphic.
+/// * `Some`  -> 1-WL cannot separate them (they may or may not be isomorphic).
+///   The two vectors hold the final colour of every vertex; equal colour IDs
+///   mean equal signatures across the two graphs.
+pub fn colour_refinement(graph_a: &Graph, graph_b: &Graph) -> Option<(Vec<u32>, Vec<u32>)> {
+    // `weisfeiler_lehman::refine` asserts equal vertex counts, so check first.
+    if graph_a.num_vertices != graph_b.num_vertices {
+        return None;
+    }
+    let graph_a_t = graph_a.transpose();
+    let graph_b_t = graph_b.transpose();
+    weisfeiler_lehman::refine(graph_a, graph_b, &graph_a_t, &graph_b_t)
 }
 
 /// Returns the sorted multiset of `(in_degree, out_degree)` pairs.

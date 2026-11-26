@@ -12,6 +12,9 @@
 //! `is_directed` flag only controls construction; it is not stored in the
 //! resulting graph.
 
+mod parser;
+pub use parser::read_graph_file;
+
 /// Vertex identifier.
 pub type Vertex = u32;
 
