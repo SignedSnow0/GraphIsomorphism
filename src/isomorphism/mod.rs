@@ -19,7 +19,14 @@ mod weisfeiler_lehman;
 use crate::graph::{DegreePair, Graph, Vertex};
 
 /// Maps each vertex of `graph_a` to its image in `graph_b`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mapping(Vec<Vertex>);
+
+impl Mapping {
+    pub(crate) fn new(vertices: Vec<Vertex>) -> Self {
+        Self(vertices)
+    }
+}
 
 impl std::fmt::Display for Mapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,7 +102,12 @@ fn degree_sequence(graph: &Graph, graph_transposed: &Graph) -> Vec<DegreePair> {
 }
 
 /// Checks whether two graphs have the same degree multiset.
-fn check_degree(graph_a: &Graph, graph_b: &Graph, graph_a_t: &Graph, graph_b_t: &Graph) -> bool {
+pub fn check_degree(
+    graph_a: &Graph,
+    graph_b: &Graph,
+    graph_a_t: &Graph,
+    graph_b_t: &Graph,
+) -> bool {
     degree_sequence(graph_a, graph_a_t) == degree_sequence(graph_b, graph_b_t)
 }
 

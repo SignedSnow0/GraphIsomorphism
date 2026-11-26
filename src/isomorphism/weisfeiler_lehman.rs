@@ -3,12 +3,18 @@
 //! For directed graphs, a vertex signature contains:
 //!
 //! 1. the vertex's current color,
-//! 2. the sorted colors of its incoming neighbors,
-//! 3. the sorted colors of its outgoing neighbors.
+//! 2. the colors of its incoming neighbors,
+//! 3. the colors of its outgoing neighbors.
 //!
-//! Both graphs are interned into the same palette during each round, so equal
-//! color IDs mean equal signatures across the two graphs. If the color
-//! histograms ever differ, the graphs cannot be isomorphic.
+//! The CPU and GPU implementations use the same hash-based colors. Instead of
+//! interning signatures in a palette, each signature is hashed directly into a
+//! [`Color`]. Neighbor colors are order-independent: each is mixed with
+//! [`mix32`] and accumulated with both `sum` and `xor`.
+//!
+//! Equal signatures always produce equal colors. A hash collision can merge
+//! two color classes, which only weakens the filter; it cannot reject an
+//! isomorphic pair. If the color histograms ever differ, the graphs cannot be
+//! isomorphic.
 //!
 //! Passing this filter is only a necessary condition. For example, every
 //! vertex of two different regular graphs with the same degree receives the
@@ -18,28 +24,22 @@
 //! <https://algorithm.tamnd.com/weisfeiler-leman/>
 
 use crate::graph::{BitMatrix, Graph, Vertex, Word, WordsPerRow};
-use std::collections::HashMap;
 
 /// Color assigned to a vertex during refinement.
+///
+/// This is `u32` to match the GPU color buffers.
 pub type Color = u32;
 
-/// Signature of a vertex in the refinement process:
-/// `(current_color, incoming_neighbor_colors, outgoing_neighbor_colors)`.
-type Signature = (Color, Vec<Color>, Vec<Color>);
-
-/// Palette of signatures to color IDs. Used to intern signatures into stable
-/// color IDs across both graphs.
-type Palette = HashMap<Signature, Color>;
-
-/// Refines vertex colors in both graphs until the partition stabilizes.
+/// Refines vertex colors in both graphs until the colors stabilize.
 ///
 /// Returns `None` when the color histograms differ, which proves that the
 /// graphs are not isomorphic. Returns `Some((colors_a, colors_b))` otherwise;
 /// this means 1-WL could not separate the graphs, not that they are
 /// isomorphic.
 ///
-/// The two returned color vectors use the same color IDs, so a color that
-/// appears in both vectors denotes the same signature in both graphs.
+/// The two returned color vectors use the same hash function, so a color that
+/// appears in both vectors denotes the same signature in both graphs, up to
+/// hash collisions.
 ///
 /// # Panics
 ///
@@ -55,90 +55,39 @@ pub(super) fn refine(
         "1-WL refinement requires graphs with the same vertex count"
     );
 
-    // (current color, incoming neighbor colors, outgoing neighbor colors) -> color ID
-    let mut palette = Palette::new();
-    let mut next_id: Color = 0;
-
     let n = graph_a.num_vertices;
 
-    // Initial colors encode the in-degree and out-degree. Interned in the
-    // shared palette, equal initial colors mean equal degree pairs across the
-    // two graphs.
+    // Initial colors encode the in-degree and out-degree. The same initial
+    // color is computed by the GPU `init_kernel`.
     let mut colors_a: Vec<Color> = (0..n)
-        .map(|u| {
-            intern(
-                &mut palette,
-                &mut next_id,
-                (
-                    0,
-                    vec![graph_a_t.out_degree(u)],
-                    vec![graph_a.out_degree(u)],
-                ),
-            )
-        })
+        .map(|u| initial_color(graph_a, graph_a_t, u))
         .collect();
 
     let mut colors_b: Vec<Color> = (0..n)
-        .map(|v| {
-            intern(
-                &mut palette,
-                &mut next_id,
-                (
-                    0,
-                    vec![graph_b_t.out_degree(v)],
-                    vec![graph_b.out_degree(v)],
-                ),
-            )
-        })
+        .map(|v| initial_color(graph_b, graph_b_t, v))
         .collect();
 
-    let mut previous_color_count = 0usize;
-
     for _ in 0..n {
-        // Histogram equality is a necessary condition for isomorphism.
         if !same_histogram(&colors_a, &colors_b) {
             return None;
         }
 
-        let mut unique = colors_a.clone();
-        unique.sort_unstable();
-        unique.dedup();
-
-        // Refinement only splits color classes, so if the number of classes
-        // stops growing the partition is stable. The number of classes in
-        // both graphs is the same because the histograms matched above.
-        if unique.len() == previous_color_count || unique.len() == n as usize {
-            break;
-        }
-        previous_color_count = unique.len();
-
-        // IDs are local to one round. The signature includes the previous
-        // round's colors, so reusing IDs from round to round is unnecessary.
-        palette.clear();
-        next_id = 0;
-
         let next_colors_a: Vec<Color> = (0..n)
-            .map(|u| {
-                intern(
-                    &mut palette,
-                    &mut next_id,
-                    vertex_signature(graph_a, graph_a_t, u, &colors_a),
-                )
-            })
+            .map(|u| hash_vertex(graph_a, graph_a_t, u, &colors_a))
             .collect();
 
         let next_colors_b: Vec<Color> = (0..n)
-            .map(|v| {
-                intern(
-                    &mut palette,
-                    &mut next_id,
-                    vertex_signature(graph_b, graph_b_t, v, &colors_b),
-                )
-            })
+            .map(|v| hash_vertex(graph_b, graph_b_t, v, &colors_b))
             .collect();
+
+        let stable = next_colors_a == colors_a && next_colors_b == colors_b;
 
         colors_a = next_colors_a;
         colors_b = next_colors_b;
+
+        if stable {
+            break;
+        }
     }
 
     if !same_histogram(&colors_a, &colors_b) {
@@ -184,44 +133,88 @@ pub(super) fn build_candidate_matrix(
     (matrix, words_per_row)
 }
 
-/// Returns the stable ID for `signature`, assigning a fresh one if needed.
-fn intern(palette: &mut Palette, next_id: &mut Color, signature: Signature) -> Color {
-    if let Some(&id) = palette.get(&signature) {
-        return id;
-    }
+/// Computes the initial color of a vertex from its in-degree and out-degree.
+///
+/// This mirrors the GPU `init_kernel`:
+///
+/// ```text
+/// h_in  = mix32(in_degree)
+/// h_out = mix32(out_degree)
+/// color = hash_palette(0, h_in, h_in, h_out, h_out)
+/// ```
+///
+/// Passing each degree twice matches the GPU kernel's `sum == xor == h`
+/// representation of the initial one-element neighbor multisets.
+fn initial_color(graph: &Graph, graph_transposed: &Graph, vertex: Vertex) -> Color {
+    let in_degree = graph_transposed.out_degree(vertex);
+    let out_degree = graph.out_degree(vertex);
 
-    let id = *next_id;
-    *next_id += 1;
-    palette.insert(signature, id);
-    id
+    let h_in = mix32(in_degree);
+    let h_out = mix32(out_degree);
+
+    hash_palette(0u32, h_in, h_in, h_out, h_out)
 }
 
-/// Builds the refinement signature of `vertex`.
+/// Computes the hashed 1-WL signature of one vertex.
 ///
-/// Incoming neighbors come from the transposed graph; outgoing neighbors
-/// come from the original graph. Sorting makes the signature independent of
-/// neighbor order.
-fn vertex_signature(
-    graph: &Graph,
-    graph_transposed: &Graph,
-    vertex: Vertex,
-    colors: &[Color],
-) -> Signature {
-    let mut in_colors: Vec<Color> = graph_transposed
-        .neighbors(vertex)
-        .iter()
-        .map(|&neighbor| colors[neighbor as usize])
-        .collect();
-    let mut out_colors: Vec<Color> = graph
-        .neighbors(vertex)
-        .iter()
-        .map(|&neighbor| colors[neighbor as usize])
-        .collect();
+/// Incoming neighbors come from the transposed graph; outgoing neighbors come
+/// from the original graph. For each neighbor color `c`, the hash contribution
+/// is `mix32(c)`. The contributions are accumulated with wrapping `sum` and
+/// `xor`, so the result does not depend on neighbor order.
+///
+/// This mirrors the GPU `hash_vertex` function.
+fn hash_vertex(graph: &Graph, graph_transposed: &Graph, vertex: Vertex, colors: &[Color]) -> Color {
+    let (in_sum, in_xor) = hash_neighbor_colors(graph_transposed.neighbors(vertex), colors);
+    let (out_sum, out_xor) = hash_neighbor_colors(graph.neighbors(vertex), colors);
 
-    in_colors.sort_unstable();
-    out_colors.sort_unstable();
+    hash_palette(colors[vertex as usize], in_sum, in_xor, out_sum, out_xor)
+}
 
-    (colors[vertex as usize], in_colors, out_colors)
+/// Aggregates neighbor colors into an order-independent `(sum, xor)` pair.
+fn hash_neighbor_colors(neighbors: &[Vertex], colors: &[Color]) -> (u32, u32) {
+    let mut sum = 0u32;
+    let mut xor = 0u32;
+
+    for &neighbor in neighbors {
+        let h = mix32(colors[neighbor as usize]);
+        sum = sum.wrapping_add(h);
+        xor ^= h;
+    }
+
+    (sum, xor)
+}
+
+/// 32-bit MurmurHash3 finalizer.
+///
+/// This is the CPU equivalent of the GPU `mix32` function. Overflow is
+/// intentional and wraps modulo 2^32.
+fn mix32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x85eb_ca6b);
+    x ^= x >> 13;
+    x = x.wrapping_mul(0xc2b2_ae35);
+    x ^= x >> 16;
+    x
+}
+
+/// Hashes one 1-WL signature.
+///
+/// The signature consists of:
+///
+/// - `seed`: the vertex's previous color (`0` during initialization),
+/// - incoming neighbor color aggregates: `in_sum`, `in_xor`,
+/// - outgoing neighbor color aggregates: `out_sum`, `out_xor`.
+///
+/// This is the CPU equivalent of the GPU `hash_palette` function.
+fn hash_palette(seed: Color, in_sum: u32, in_xor: u32, out_sum: u32, out_xor: u32) -> Color {
+    let mut h = mix32(seed ^ 0x9e37_79b9);
+
+    h = mix32(h.wrapping_mul(0x85eb_ca6b).wrapping_add(in_sum));
+    h = mix32(h.wrapping_mul(0xc2b2_ae35).wrapping_add(in_xor));
+    h = mix32(h.wrapping_mul(0x85eb_ca6b).wrapping_add(out_sum));
+    h = mix32(h.wrapping_mul(0xc2b2_ae35).wrapping_add(out_xor));
+
+    h
 }
 
 /// Checks whether two color vectors contain the same multiset of colors.
@@ -244,46 +237,57 @@ mod tests {
     }
 
     #[test]
-    fn test_intern() {
-        let mut palette = Palette::new();
-        let mut next_id: Color = 0;
-        let sig1 = (1, vec![2], vec![3]);
-        let sig2 = (1, vec![2], vec![3]);
-        let sig3 = (4, vec![5], vec![6]);
+    fn test_hash_palette_is_deterministic() {
+        let first = hash_palette(1, 2, 3, 4, 5);
+        let second = hash_palette(1, 2, 3, 4, 5);
 
-        let id1 = intern(&mut palette, &mut next_id, sig1);
-        let id2 = intern(&mut palette, &mut next_id, sig2);
-        let id3 = intern(&mut palette, &mut next_id, sig3);
-
-        assert_eq!(id1, id2);
-        assert_ne!(id1, id3);
+        assert_eq!(first, second);
     }
 
     #[test]
-    fn test_vertex_signature_undirected() {
-        let edges = [(0, 1), (1, 2), (2, 0)];
-        let graph = Graph::new(3, &edges, false);
-        let graph_t = graph.transpose();
-        let colors: Vec<Color> = vec![0, 1, 2];
-
-        assert_eq!(
-            vertex_signature(&graph, &graph_t, 0, &colors),
-            (0, vec![1, 2], vec![1, 2])
-        );
-    }
-
-    #[test]
-    fn test_vertex_signature_directed() {
-        // Directed path 0 -> 1 -> 2.
+    fn test_hash_vertex_uses_incoming_and_outgoing_neighbors() {
+        // Directed path 0 -> 1 -> 2. Vertex 1 has incoming neighbor 0 and
+        // outgoing neighbor 2.
         let edges = [(0, 1), (1, 2)];
         let graph = Graph::new(3, &edges, true);
         let graph_t = graph.transpose();
         let colors: Vec<Color> = vec![0, 1, 2];
 
-        // Vertex 1 has incoming neighbor 0 and outgoing neighbor 2.
+        let (in_sum, in_xor) = hash_neighbor_colors(graph_t.neighbors(1), &colors);
+        let (out_sum, out_xor) = hash_neighbor_colors(graph.neighbors(1), &colors);
+
+        assert_eq!(in_sum, mix32(0));
+        assert_eq!(in_xor, mix32(0));
+        assert_eq!(out_sum, mix32(2));
+        assert_eq!(out_xor, mix32(2));
+
+        let expected = hash_palette(1, in_sum, in_xor, out_sum, out_xor);
+        assert_eq!(hash_vertex(&graph, &graph_t, 1, &colors), expected);
+    }
+
+    #[test]
+    fn test_hash_vertex_ignores_neighbor_order() {
+        let colors: Vec<Color> = vec![0, 1, 2, 3];
+
+        let ordered = Graph {
+            num_vertices: 4,
+            row_offsets: vec![0, 2, 4, 4, 4],
+            col_indices: vec![1, 2, 3, 0],
+        };
+        let reordered = Graph {
+            num_vertices: 4,
+            row_offsets: vec![0, 2, 4, 4, 4],
+            col_indices: vec![2, 1, 0, 3],
+        };
+        let empty_transpose = Graph {
+            num_vertices: 4,
+            row_offsets: vec![0, 0, 0, 0, 0],
+            col_indices: vec![],
+        };
+
         assert_eq!(
-            vertex_signature(&graph, &graph_t, 1, &colors),
-            (1, vec![0], vec![2])
+            hash_vertex(&ordered, &empty_transpose, 0, &colors),
+            hash_vertex(&reordered, &empty_transpose, 0, &colors)
         );
     }
 

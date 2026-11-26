@@ -1,5 +1,6 @@
 //! Small demonstration of the graph isomorphism implementation.
 
+mod gpu;
 mod graph;
 mod isomorphism;
 
@@ -12,6 +13,8 @@ fn main() {
     let graph_b = Graph::new(3, &[(1, 0), (0, 2), (2, 1)], false);
 
     let mapping = find_isomorphism(&graph_a, &graph_b);
+    let gpu_mapping = gpu::find_isomorphism(&graph_a, &graph_b);
+    assert_eq!(mapping, gpu_mapping);
 
     match mapping {
         Some(mapping) => {
@@ -19,6 +22,15 @@ fn main() {
         }
         None => {
             println!("No isomorphism found for two triangles.");
+        }
+    }
+
+    match gpu_mapping {
+        Some(mapping) => {
+            println!("Found isomorphism for two triangles (GPU): {}", mapping);
+        }
+        None => {
+            println!("No isomorphism found for two triangles (GPU).");
         }
     }
 
@@ -73,6 +85,13 @@ fn main() {
     let mapping =
         find_isomorphism(&graph_a, &graph_b).expect("the relabeled Frucht graph is isomorphic");
     println!("Frucht graph mapping (position u -> value): {}", mapping);
+    let gpu_mapping = gpu::find_isomorphism(&graph_a, &graph_b)
+        .expect("the relabeled Frucht graph is isomorphic (GPU)");
+    println!(
+        "Frucht graph mapping (GPU) (position u -> value): {}",
+        gpu_mapping
+    );
+    assert_eq!(mapping, gpu_mapping);
 
     // A 6-cycle and two disjoint triangles. Both are 2-regular with 6 edges,
     // so the cheap filters and 1-WL cannot separate them. Ullman's
@@ -81,12 +100,23 @@ fn main() {
     let triangles = Graph::new(6, &[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)], false);
 
     let mapping = find_isomorphism(&cycle, &triangles);
+    let gpu_mapping = gpu::find_isomorphism(&cycle, &triangles);
+    assert_eq!(mapping, gpu_mapping);
     match mapping {
         Some(mapping) => {
             println!("C6 and two triangles are isomorphic: {}", mapping);
         }
         None => {
             println!("No isomorphism found between C6 and two triangles.");
+        }
+    }
+
+    match gpu_mapping {
+        Some(mapping) => {
+            println!("C6 and two triangles are isomorphic (GPU): {}", mapping);
+        }
+        None => {
+            println!("No isomorphism found between C6 and two triangles (GPU).");
         }
     }
 }
