@@ -3,10 +3,31 @@
 mod graph;
 mod isomorphism;
 
-use graph::Graph;
-use isomorphism::find_isomorphism;
+use graph::{Graph, read_graph_file};
+use isomorphism::{colour_refinement, find_isomorphism};
+use std::collections::HashSet;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // File mode: `cargo run -- graph_a.txt graph_b.txt`
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 2 {
+        let graph_a = read_graph_file(&args[0], false)?;
+        let graph_b = read_graph_file(&args[1], false)?;
+
+        match colour_refinement(&graph_a, &graph_b) {
+            None => println!("1-WL: NOT isomorphic"),
+            Some((colors_a, _)) => {
+                let classes = colors_a.iter().collect::<HashSet<_>>().len();
+                println!("1-WL cannot separate them ({classes} colour classes)");
+            }
+        }
+
+        match find_isomorphism(&graph_a, &graph_b) {
+            Some(mapping) => println!("Full search: isomorphic {mapping}"),
+            None => println!("Full search: NOT isomorphic"),
+        }
+        return Ok(());
+    }
     // Two labelings of the same triangle.
     let graph_a = Graph::new(3, &[(0, 1), (1, 2), (2, 0)], false);
     let graph_b = Graph::new(3, &[(1, 0), (0, 2), (2, 1)], false);
@@ -89,4 +110,5 @@ fn main() {
             println!("No isomorphism found between C6 and two triangles.");
         }
     }
+    Ok(())
 }
