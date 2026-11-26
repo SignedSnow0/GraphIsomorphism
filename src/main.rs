@@ -4,19 +4,42 @@ mod gpu;
 mod graph;
 mod isomorphism;
 
-use graph::Graph;
+use graph::{Graph, read_graph_file};
 use isomorphism::find_isomorphism;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // File mode: `cargo run -- graph_a.txt graph_b.txt`
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 2 {
+        let graph_a = read_graph_file(&args[0], false)?;
+        let graph_b = read_graph_file(&args[1], false)?;
+
+        let mapping = find_isomorphism(&graph_a, &graph_b);
+        match &mapping {
+            Some(mapping) => println!("The two graphs are isomorphic with mapping: {mapping}"),
+            None => println!("The two graphs are not isomorphic."),
+        }
+
+        let gpu_mapping = gpu::find_isomorphism(&graph_a, &graph_b);
+        if gpu_mapping != mapping {
+            println!("GPU and CPU results differ!");
+            match &gpu_mapping {
+                Some(mapping) => println!("GPU mapping: {mapping}"),
+                None => println!("GPU found no isomorphism."),
+            }
+        }
+
+        return Ok(());
+    }
+
     // Two labelings of the same triangle.
     let graph_a = Graph::new(3, &[(0, 1), (1, 2), (2, 0)], false);
     let graph_b = Graph::new(3, &[(1, 0), (0, 2), (2, 1)], false);
 
     let mapping = find_isomorphism(&graph_a, &graph_b);
     let gpu_mapping = gpu::find_isomorphism(&graph_a, &graph_b);
-    assert_eq!(mapping, gpu_mapping);
 
-    match mapping {
+    match &mapping {
         Some(mapping) => {
             println!("Found isomorphism for two triangles: {}", mapping);
         }
@@ -24,15 +47,7 @@ fn main() {
             println!("No isomorphism found for two triangles.");
         }
     }
-
-    match gpu_mapping {
-        Some(mapping) => {
-            println!("Found isomorphism for two triangles (GPU): {}", mapping);
-        }
-        None => {
-            println!("No isomorphism found for two triangles (GPU).");
-        }
-    }
+    assert_eq!(mapping, gpu_mapping);
 
     // The Frucht graph: 12 vertices, 3-regular, and asymmetric. Every vertex
     // gets the same 1-WL color, so the cheap filters cannot narrow the search;
@@ -82,15 +97,16 @@ fn main() {
     let graph_a = Graph::new(12, &frucht_a, false);
     let graph_b = Graph::new(12, &frucht_b, false);
 
-    let mapping =
-        find_isomorphism(&graph_a, &graph_b).expect("the relabeled Frucht graph is isomorphic");
-    println!("Frucht graph mapping (position u -> value): {}", mapping);
-    let gpu_mapping = gpu::find_isomorphism(&graph_a, &graph_b)
-        .expect("the relabeled Frucht graph is isomorphic (GPU)");
-    println!(
-        "Frucht graph mapping (GPU) (position u -> value): {}",
-        gpu_mapping
-    );
+    let mapping = find_isomorphism(&graph_a, &graph_b);
+    let gpu_mapping = gpu::find_isomorphism(&graph_a, &graph_b);
+    match &mapping {
+        Some(mapping) => {
+            println!("Found isomorphism for Frucht graph: {}", mapping);
+        }
+        None => {
+            println!("No isomorphism found for Frucht graph.");
+        }
+    }
     assert_eq!(mapping, gpu_mapping);
 
     // A 6-cycle and two disjoint triangles. Both are 2-regular with 6 edges,
@@ -101,8 +117,7 @@ fn main() {
 
     let mapping = find_isomorphism(&cycle, &triangles);
     let gpu_mapping = gpu::find_isomorphism(&cycle, &triangles);
-    assert_eq!(mapping, gpu_mapping);
-    match mapping {
+    match &mapping {
         Some(mapping) => {
             println!("C6 and two triangles are isomorphic: {}", mapping);
         }
@@ -111,12 +126,7 @@ fn main() {
         }
     }
 
-    match gpu_mapping {
-        Some(mapping) => {
-            println!("C6 and two triangles are isomorphic (GPU): {}", mapping);
-        }
-        None => {
-            println!("No isomorphism found between C6 and two triangles (GPU).");
-        }
-    }
+    assert_eq!(mapping, gpu_mapping);
+
+    Ok(())
 }

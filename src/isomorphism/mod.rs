@@ -56,6 +56,7 @@ impl std::fmt::Display for Mapping {
 /// The worst-case running time is exponential in the number of vertices.
 /// Graphs that are hard for color refinement, such as large regular graphs,
 /// are the expensive cases.
+///
 pub fn find_isomorphism(graph_a: &Graph, graph_b: &Graph) -> Option<Mapping> {
     if graph_a.num_vertices != graph_b.num_vertices || graph_a.num_edges() != graph_b.num_edges() {
         return None;
